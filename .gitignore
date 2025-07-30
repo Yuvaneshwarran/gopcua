@@ -1,0 +1,7 @@
+# Python virtual environment
+opcua-py312-env/
+
+# VSCode settings
+.vscode/
+
+opcua_server/opcua-py312-env

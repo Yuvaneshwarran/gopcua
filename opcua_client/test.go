@@ -44,13 +44,10 @@ type OpcuaRequest struct {
 	robot             string
 }
 
-// ProcessOpcua is the main entry point for handling an OPC UA task.
 func ProcessOpcua(task map[string]interface{}, robot string) (bool, map[string]interface{}) {
-	// Changed from loaders.Logger.Infof
 	Infof("Processing OPC UA task: %v", task)
 	var opcuaReq OpcuaRequest
 	if err := validateOpcuaConfig(task); err != nil {
-		// Changed from global.TASK_FAILURE
 		return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": err.Error()}
 	}
 
@@ -62,17 +59,24 @@ func ProcessOpcua(task map[string]interface{}, robot string) (bool, map[string]i
 		return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Unable to establish a connection to OPC UA server"}
 	}
 	opcuaReq.client = client
-
 	results := make([]map[string]interface{}, 0)
+
+	// --- LOGIC CHANGE: Extract namespace index before processing ---
+	config, _ := task["config"].(map[string]interface{})
+	namespaceIndex, err := extractIntField(config, "namespace_index")
+	if err != nil {
+		return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Missing or invalid 'namespace_index' in config"}
+	}
 
 	// Process Read operations
 	if len(opcuaReq.Config.Read) > 0 {
 		for _, readConfig := range opcuaReq.Config.Read {
-			data, err := opcuaReq.executeOpcuaRead(readConfig)
+			// Pass the namespaceIndex to the execute function
+			data, err := opcuaReq.executeOpcuaRead(readConfig, namespaceIndex)
 			if err != nil {
 				Errorf("Error during OPC UA read: %v", err)
 				if opcuaReq.handleConnectionError(err) {
-					data, err = opcuaReq.executeOpcuaRead(readConfig)
+					data, err = opcuaReq.executeOpcuaRead(readConfig, namespaceIndex)
 					if err != nil {
 						Errorf("Error during OPC UA read after reconnect: %v", err)
 						return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error reading data from OPC UA after reconnection"}
@@ -90,11 +94,12 @@ func ProcessOpcua(task map[string]interface{}, robot string) (bool, map[string]i
 	// Process Write operations
 	if len(opcuaReq.Config.Write) > 0 {
 		for _, writeConfig := range opcuaReq.Config.Write {
-			err := opcuaReq.executeOpcuaWrite(writeConfig)
+			// Pass the namespaceIndex to the execute function
+			err := opcuaReq.executeOpcuaWrite(writeConfig, namespaceIndex)
 			if err != nil {
 				Errorf("Error during OPC UA write: %v", err)
 				if opcuaReq.handleConnectionError(err) {
-					err = opcuaReq.executeOpcuaWrite(writeConfig)
+					err = opcuaReq.executeOpcuaWrite(writeConfig, namespaceIndex)
 					if err != nil {
 						Errorf("Error during OPC UA write after reconnect: %v", err)
 						return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error writing data to OPC UA after reconnection"}
@@ -248,47 +253,51 @@ func (opcuaReq *OpcuaRequest) handleConnectionError(err error) bool {
 	}
 }
 
-// executeOpcuaRead performs a single read operation.
-func (opcuaReq *OpcuaRequest) executeOpcuaRead(readConfig interface{}) (interface{}, error) {
+// executeOpcuaRead now takes a namespaceIndex to construct the NodeID.
+func (opcuaReq *OpcuaRequest) executeOpcuaRead(readConfig interface{}, namespaceIndex int) (interface{}, error) {
 	taskDetails, ok := readConfig.(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("invalid readConfig format")
 	}
-	nodeIDStr, ok := taskDetails["node_id"].(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid or missing 'node_id' field: expected string")
-	}
-	nodeID, err := ua.ParseNodeID(nodeIDStr)
+
+	nodeIDNum, err := extractIntField(taskDetails, "node_id")
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse node_id '%s': %w", nodeIDStr, err)
+		return nil, fmt.Errorf("invalid or missing 'node_id' field: %w", err)
 	}
+
+	// Construct the NodeID from the namespace and numeric ID
+	nodeID := ua.NewNumericNodeID(uint16(namespaceIndex), uint32(nodeIDNum))
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(opcuaReq.ResponseTimeout)*time.Second)
 	defer cancel()
+
 	v, err := opcuaReq.client.Node(nodeID).Value(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read value for node '%s': %w", nodeIDStr, err)
+		return nil, fmt.Errorf("failed to read value for node '%s': %w", nodeID.String(), err)
 	}
 	return v.Value(), nil
 }
 
-// executeOpcuaWrite performs a single write operation.
-func (opcuaReq *OpcuaRequest) executeOpcuaWrite(writeConfig interface{}) error {
+// executeOpcuaWrite now takes a namespaceIndex to construct the NodeID.
+func (opcuaReq *OpcuaRequest) executeOpcuaWrite(writeConfig interface{}, namespaceIndex int) error {
 	taskDetails, ok := writeConfig.(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("invalid type for writeConfig: expected map[string]interface{}")
 	}
-	nodeIDStr, ok := taskDetails["node_id"].(string)
-	if !ok {
-		return fmt.Errorf("invalid or missing 'node_id' field: expected string")
+
+	nodeIDNum, err := extractIntField(taskDetails, "node_id")
+	if err != nil {
+		return fmt.Errorf("invalid or missing 'node_id' field: %w", err)
 	}
+
 	value, exists := taskDetails["value"]
 	if !exists {
 		return fmt.Errorf("missing 'value' field for write operation")
 	}
-	nodeID, err := ua.ParseNodeID(nodeIDStr)
-	if err != nil {
-		return fmt.Errorf("failed to parse node_id '%s': %w", nodeIDStr, err)
-	}
+
+	// Construct the NodeID from the namespace and numeric ID
+	nodeID := ua.NewNumericNodeID(uint16(namespaceIndex), uint32(nodeIDNum))
+
 	variant, err := ua.NewVariant(value)
 	if err != nil {
 		return fmt.Errorf("failed to create variant from value '%v': %w", value, err)
@@ -305,16 +314,18 @@ func (opcuaReq *OpcuaRequest) executeOpcuaWrite(writeConfig interface{}) error {
 			},
 		},
 	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(opcuaReq.ResponseTimeout)*time.Second)
 	defer cancel()
+
 	_, err = opcuaReq.client.Write(ctx, req)
 	if err != nil {
-		return fmt.Errorf("failed to write value to node '%s': %w", nodeIDStr, err)
+		return fmt.Errorf("failed to write value to node '%s': %w", nodeID.String(), err)
 	}
 	return nil
 }
 
-// validateOpcuaConfig checks if the task map has the required fields for OPC UA.
+// validateOpcuaConfig now also checks for namespace_index.
 func validateOpcuaConfig(task map[string]interface{}) error {
 	connection, ok := task["connection"].(map[string]interface{})
 	if !ok {
@@ -326,6 +337,9 @@ func validateOpcuaConfig(task map[string]interface{}) error {
 	config, ok := task["config"].(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("missing or invalid 'config' in task")
+	}
+	if _, err := extractIntField(config, "namespace_index"); err != nil {
+		return fmt.Errorf("missing or invalid 'namespace_index' in 'config'")
 	}
 	_, readOk := config["read"].([]interface{})
 	_, writeOk := config["write"].([]interface{})
