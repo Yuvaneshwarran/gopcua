@@ -1,44 +1,34 @@
 import time
-from opcua import Server
+from opcua import Server, ua
 
 # --- 1. Setup the Server ---
 server = Server()
-
-# Set the endpoint URL
-server.set_endpoint("opc.tcp://0.0.0.0:4840/freeopcua/server/")
-
-# Set the server name
-server.set_server_name("My Python OPC UA Server")
+server.set_endpoint("opc.tcp://0.0.0.0:4840/freeopcua/server/") # Set the endpoint URL
+server.set_server_name("My Python OPC UA Server") # Set the server name
 
 # --- 2. Create Custom Namespace and Nodes ---
-
-# Register a new namespace for our custom nodes
-uri = "http://examples.gopcua.org/robot"
+uri = "http://examples.gopcua.org/robot" # Register a new namespace for our custom nodes
 idx = server.register_namespace(uri)
+objects = server.get_objects_node() # Get the Objects folder, which is the standard place for custom nodes
+robot = objects.add_object(idx, "Robot") # Create a "Robot" object folder within our namespace to organize variables
 
-# Get the Objects folder, which is the standard place for custom nodes
-objects = server.get_objects_node()
-
-# Create a "Robot" object folder within our namespace to organize variables
-robot = objects.add_object(idx, "Robot")
-
-# Add the "Robot.Temperature" variable with a string NodeID
-# The NodeID will be ns=2;s=Robot.Temperature
-temp_var = robot.add_variable(f"ns={idx};s=Robot.Temperature", "Robot.Temperature", 25.0)
+# Create node ID for robot_temperature
+temp_node_id = ua.NodeId(5001, idx)
+temp_var = robot.add_variable(temp_node_id, "Robot.Temperature", 25.0)
 temp_var.set_writable() # Allow clients to change this value
 
-# Add the "Robot.Status" variable with a string NodeID
-# The NodeID will be ns=2;s=Robot.Status
-status_var = robot.add_variable(f"ns={idx};s=Robot.Status", "Robot.Status", "Idle")
-status_var.set_writable() # Allow clients to change this value
+# Create node ID for robot_status
+status_node_id = ua.NodeId(5002, idx)
+status_var = robot.add_variable(status_node_id, "Robot.Status", "Idle")
+status_var.set_writable() # Allow clients to change this value 
 
 # --- 3. Start the Server and Run ---
 server.start()
 print(f"Server started at {server.endpoint}")
 print(f"Custom namespace index is {idx}")
 print("Nodes available at:")
-print(f"  - {temp_var.nodeid}")
-print(f"  - {status_var.nodeid}")
+print(f"  - {temp_var.nodeid}") # should now print ns=2; i=5001
+print(f"  - {status_var.nodeid}") # should now print ns=2; i=5002
 
 try:
     # Keep the server running and update temperature every 2 seconds
