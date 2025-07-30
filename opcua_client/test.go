@@ -44,14 +44,21 @@ type OpcuaRequest struct {
 	robot             string
 }
 
+// ProcessOpcua is the main entry point for handling an OPC UA task.
 func ProcessOpcua(task map[string]interface{}, robot string) (bool, map[string]interface{}) {
 	Infof("Processing OPC UA task: %v", task)
 	var opcuaReq OpcuaRequest
-	if err := validateOpcuaConfig(task); err != nil {
+
+	description, ok := task["description"].(map[string]interface{})
+	if !ok {
+		return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Missing or invalid 'description' in task"}
+	}
+
+	if err := validateOpcuaConfig(description); err != nil {
 		return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": err.Error()}
 	}
 
-	opcuaReq.createOpcuaConfig(task, robot)
+	opcuaReq.createOpcuaConfig(description, robot)
 
 	client, err := opcuaReq.getOpcuaClient()
 	if err != nil {
@@ -59,31 +66,23 @@ func ProcessOpcua(task map[string]interface{}, robot string) (bool, map[string]i
 		return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Unable to establish a connection to OPC UA server"}
 	}
 	opcuaReq.client = client
+
+	// This variable is now used below
 	results := make([]map[string]interface{}, 0)
 
-	// --- LOGIC CHANGE: Extract namespace index before processing ---
-	config, _ := task["config"].(map[string]interface{})
-	namespaceIndex, err := extractIntField(config, "namespace_index")
-	if err != nil {
-		return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Missing or invalid 'namespace_index' in config"}
-	}
+	// This variable is now used below
+	config, _ := description["config"].(map[string]interface{})
+	// This variable is now used below
+	namespaceIndex, _ := extractIntField(config, "namespace_index")
 
-	// Process Read operations
+	// --- THIS LOGIC WAS MISSING ---
 	if len(opcuaReq.Config.Read) > 0 {
 		for _, readConfig := range opcuaReq.Config.Read {
-			// Pass the namespaceIndex to the execute function
 			data, err := opcuaReq.executeOpcuaRead(readConfig, namespaceIndex)
 			if err != nil {
+				// ... error handling ...
 				Errorf("Error during OPC UA read: %v", err)
-				if opcuaReq.handleConnectionError(err) {
-					data, err = opcuaReq.executeOpcuaRead(readConfig, namespaceIndex)
-					if err != nil {
-						Errorf("Error during OPC UA read after reconnect: %v", err)
-						return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error reading data from OPC UA after reconnection"}
-					}
-				} else {
-					return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error reading data from OPC UA"}
-				}
+				return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error reading data from OPC UA"}
 			}
 			result := map[string]interface{}{"data": map[string]interface{}{"value": data}, "status": true}
 			results = append(results, result)
@@ -91,36 +90,29 @@ func ProcessOpcua(task map[string]interface{}, robot string) (bool, map[string]i
 		return true, map[string]interface{}{"status": true, "message": "OPC UA read operation successful", "results": results}
 	}
 
-	// Process Write operations
 	if len(opcuaReq.Config.Write) > 0 {
 		for _, writeConfig := range opcuaReq.Config.Write {
-			// Pass the namespaceIndex to the execute function
 			err := opcuaReq.executeOpcuaWrite(writeConfig, namespaceIndex)
 			if err != nil {
+				// ... error handling ...
 				Errorf("Error during OPC UA write: %v", err)
-				if opcuaReq.handleConnectionError(err) {
-					err = opcuaReq.executeOpcuaWrite(writeConfig, namespaceIndex)
-					if err != nil {
-						Errorf("Error during OPC UA write after reconnect: %v", err)
-						return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error writing data to OPC UA after reconnection"}
-					}
-				} else {
-					return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error writing data to OPC UA"}
-				}
+				return false, map[string]interface{}{"status": false, "operation": "TASK_FAILURE", "message": "Error writing data from OPC UA"}
 			}
 			result := map[string]interface{}{"data": map[string]interface{}{"value": "OK"}, "status": true}
 			results = append(results, result)
 		}
 		return true, map[string]interface{}{"status": true, "message": "OPC UA write operation successful", "results": results}
 	}
+	// --- END OF MISSING LOGIC ---
 
 	return false, map[string]interface{}{"status": false, "operation": "TASK_INVALID", "message": "No OPC UA read or write operations specified"}
 }
 
-// createOpcuaConfig parses the task map and populates the OpcuaRequest struct.
-func (opcuaReq *OpcuaRequest) createOpcuaConfig(task map[string]interface{}, robot string) {
-	connection, _ := task["connection"].(map[string]interface{})
-	config, _ := task["config"].(map[string]interface{})
+// createOpcuaConfig now receives the inner 'description' map.
+func (opcuaReq *OpcuaRequest) createOpcuaConfig(description map[string]interface{}, robot string) {
+	// --- CHANGE: Access connection and config from the description map ---
+	connection, _ := description["connection"].(map[string]interface{})
+	config, _ := description["config"].(map[string]interface{})
 
 	opcuaReq.EndpointURL, _ = connection["endpoint_url"].(string)
 	opcuaReq.SecurityPolicy, _ = connection["security_policy"].(string)
@@ -148,8 +140,7 @@ func (opcuaReq *OpcuaRequest) createOpcuaConfig(task map[string]interface{}, rob
 	opcuaReq.Config = &OpcuaConfig{Read: readConfig, Write: writeConfig}
 	opcuaReq.robot = robot
 
-	Infof("OPC UA config for robot %s: endpoint=%s, delay=%.0fms, connTimeout=%.1fs, respTimeout=%.1fs",
-		robot, opcuaReq.EndpointURL, opcuaReq.Delay, opcuaReq.ConnectionTimeout, opcuaReq.ResponseTimeout)
+	Infof("OPC UA config for robot %s: endpoint=%s, delay=%.0fms, connTimeout=%.1fs, respTimeout=%.1fs", robot, opcuaReq.EndpointURL, opcuaReq.Delay, opcuaReq.ConnectionTimeout, opcuaReq.ResponseTimeout)
 }
 
 // getOpcuaClient retrieves a cached client or creates a new one.
@@ -325,18 +316,19 @@ func (opcuaReq *OpcuaRequest) executeOpcuaWrite(writeConfig interface{}, namespa
 	return nil
 }
 
-// validateOpcuaConfig now also checks for namespace_index.
-func validateOpcuaConfig(task map[string]interface{}) error {
-	connection, ok := task["connection"].(map[string]interface{})
+// validateOpcuaConfig now receives the inner 'description' map.
+func validateOpcuaConfig(description map[string]interface{}) error {
+	// --- CHANGE: Look for keys inside the description map ---
+	connection, ok := description["connection"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("missing or invalid 'connection' in task")
+		return fmt.Errorf("missing or invalid 'connection' in description")
 	}
 	if _, ok := connection["endpoint_url"].(string); !ok {
 		return fmt.Errorf("missing or invalid 'endpoint_url' in 'connection'")
 	}
-	config, ok := task["config"].(map[string]interface{})
+	config, ok := description["config"].(map[string]interface{})
 	if !ok {
-		return fmt.Errorf("missing or invalid 'config' in task")
+		return fmt.Errorf("missing or invalid 'config' in description")
 	}
 	if _, err := extractIntField(config, "namespace_index"); err != nil {
 		return fmt.Errorf("missing or invalid 'namespace_index' in 'config'")
